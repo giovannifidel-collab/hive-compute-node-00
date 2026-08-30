@@ -8,8 +8,16 @@ on:
       - 'worker/**'
   workflow_dispatch:
     inputs:
+      mode:
+        description: Execution mode
+        required: true
+        default: direct
+        type: choice
+        options:
+          - direct
+          - claim
       task_type:
-        description: Allow-listed HIVE task type
+        description: Allow-listed direct task type
         required: true
         default: selftest
         type: choice
@@ -17,17 +25,17 @@ on:
           - selftest
           - sha256-burn
       job_id:
-        description: HIVE job identifier
+        description: Direct-mode job identifier
         required: true
         default: manual-canary
         type: string
       payload_json:
-        description: JSON object payload
+        description: Direct-mode JSON object payload
         required: true
         default: '{"rounds":250000}'
         type: string
       shard:
-        description: Logical shard number
+        description: Direct-mode logical shard number
         required: true
         default: 0
         type: number
@@ -46,6 +54,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3]
+    env:
+      HIVE_WORKER_ENDPOINT: https://hive-alveare.pages.dev/api/compute-worker
+      CF_ACCESS_CLIENT_ID: ${{ secrets.HIVE_CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.HIVE_CF_ACCESS_CLIENT_SECRET }}
     steps:
       - name: Checkout worker
         uses: actions/checkout@v4
@@ -59,6 +71,12 @@ jobs:
         env:
           OIDC_OUTPUT: artifacts/oidc-claims-${{ matrix.shard }}.json
         run: python worker/oidc_claims.py
+
+      - name: Probe HIVE edge identity when Access is configured
+        run: >-
+          python worker/hive_client.py identity
+          --optional
+          --output "artifacts/hive-identity-${{ matrix.shard }}.json"
 
       - name: Execute deterministic canary workload
         run: >-
@@ -87,6 +105,7 @@ jobs:
           PY
 
       - name: Upload canary evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hive-cpu00-canary-${{ github.run_id }}-shard-${{ matrix.shard }}
@@ -99,6 +118,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      HIVE_WORKER_ENDPOINT: https://hive-alveare.pages.dev/api/compute-worker
+      CF_ACCESS_CLIENT_ID: ${{ secrets.HIVE_CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.HIVE_CF_ACCESS_CLIENT_SECRET }}
     steps:
       - name: Checkout worker
         uses: actions/checkout@v4
@@ -113,7 +136,16 @@ jobs:
           OIDC_OUTPUT: artifacts/oidc-claims.json
         run: python worker/oidc_claims.py
 
-      - name: Execute allow-listed HIVE task
+      - name: Claim and execute one HIVE task
+        if: inputs.mode == 'claim'
+        run: python worker/run_hive_claim.py --lease-seconds 600 --artifact-dir artifacts
+
+      - name: Probe HIVE identity for direct mode
+        if: inputs.mode == 'direct'
+        run: python worker/hive_client.py identity --optional --output artifacts/hive-identity.json
+
+      - name: Execute allow-listed direct task
+        if: inputs.mode == 'direct'
         env:
           TASK_TYPE: ${{ inputs.task_type }}
           JOB_ID: ${{ inputs.job_id }}
@@ -128,6 +160,7 @@ jobs:
           --output artifacts/result.json
 
       - name: Upload task evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hive-cpu00-result-${{ github.run_id }}
