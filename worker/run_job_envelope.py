@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 ALLOWED_WORKLOADS = {"selftest", "sha256-burn"}
+
+
+def canonical_hash(value):
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def decode_envelope(raw_b64: str):
@@ -78,11 +84,14 @@ def main():
     ], check=True)
 
     result = json.loads(out.read_text())
+    base_result_sha256 = result.pop("result_sha256", None)
     result["project_slug"] = envelope["project_slug"]
     result["hive_task_id"] = args.hive_task_id or None
     result["attempt_token"] = args.attempt_token or None
     result["job_envelope"] = envelope
     result["dispatch_mode"] = "stateless-artifact"
+    result["base_result_sha256"] = base_result_sha256
+    result["result_sha256"] = canonical_hash(result)
     out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps({
         "ok": result.get("status") == "done",
@@ -91,6 +100,7 @@ def main():
         "job_id": job_id,
         "project_slug": envelope["project_slug"],
         "dispatch_mode": result["dispatch_mode"],
+        "result_sha256": result["result_sha256"],
     }, sort_keys=True))
 
 
