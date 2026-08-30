@@ -22,6 +22,11 @@ on:
         required: false
         default: ''
         type: string
+      attempt_token:
+        description: HIVE stateless dispatch attempt token
+        required: false
+        default: ''
+        type: string
       envelope_b64:
         description: URL-safe base64 HIVE Job Envelope v1 for stateless execution
         required: false
@@ -124,6 +129,7 @@ jobs:
           python worker/run_job_envelope.py \
             --envelope-b64 "$ENVELOPE_B64" \
             --hive-task-id "canary-${GITHUB_RUN_ID}-${SHARD}" \
+            --attempt-token "canary-attempt-${GITHUB_RUN_ID}-${SHARD}" \
             --output "artifacts/stateless-result-${SHARD}.json"
 
       - name: Validate result envelopes
@@ -145,6 +151,7 @@ jobs:
           assert stateless['dispatch_mode']=='stateless-artifact'
           assert stateless['project_slug']=='hive'
           assert stateless['hive_task_id']
+          assert stateless['attempt_token']
           assert stateless['job_envelope']['workload']['name']=='selftest'
           print('direct result valid:', direct['result_sha256'])
           print('stateless envelope result valid:', stateless['job_id'])
@@ -186,12 +193,16 @@ jobs:
         if: inputs.mode == 'envelope'
         env:
           HIVE_TASK_ID: ${{ inputs.hive_task_id }}
+          ATTEMPT_TOKEN: ${{ inputs.attempt_token }}
           ENVELOPE_B64: ${{ inputs.envelope_b64 }}
         run: |
+          test -n "$HIVE_TASK_ID" || { echo 'hive_task_id is required for envelope mode' >&2; exit 2; }
+          test -n "$ATTEMPT_TOKEN" || { echo 'attempt_token is required for envelope mode' >&2; exit 2; }
           test -n "$ENVELOPE_B64" || { echo 'envelope_b64 is required for envelope mode' >&2; exit 2; }
           python worker/run_job_envelope.py \
             --envelope-b64 "$ENVELOPE_B64" \
             --hive-task-id "$HIVE_TASK_ID" \
+            --attempt-token "$ATTEMPT_TOKEN" \
             --output artifacts/result.json
 
       - name: Claim and execute one HIVE task
