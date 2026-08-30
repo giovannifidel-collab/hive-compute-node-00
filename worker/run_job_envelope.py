@@ -55,6 +55,7 @@ def main():
     parser = argparse.ArgumentParser(description="Execute a HIVE Job Envelope v1 without worker secrets")
     parser.add_argument("--envelope-b64", required=True)
     parser.add_argument("--hive-task-id", default="")
+    parser.add_argument("--attempt-token", default="")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -79,12 +80,14 @@ def main():
     result = json.loads(out.read_text())
     result["project_slug"] = envelope["project_slug"]
     result["hive_task_id"] = args.hive_task_id or None
+    result["attempt_token"] = args.attempt_token or None
     result["job_envelope"] = envelope
     result["dispatch_mode"] = "stateless-artifact"
     out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps({
         "ok": result.get("status") == "done",
         "hive_task_id": result.get("hive_task_id"),
+        "attempt_token_present": bool(result.get("attempt_token")),
         "job_id": job_id,
         "project_slug": envelope["project_slug"],
         "dispatch_mode": result["dispatch_mode"],
