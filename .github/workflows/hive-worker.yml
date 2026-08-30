@@ -1,0 +1,136 @@
+name: HIVE CPU-00 Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hive-worker.yml'
+      - 'worker/**'
+  workflow_dispatch:
+    inputs:
+      task_type:
+        description: Allow-listed HIVE task type
+        required: true
+        default: selftest
+        type: choice
+        options:
+          - selftest
+          - sha256-burn
+      job_id:
+        description: HIVE job identifier
+        required: true
+        default: manual-canary
+        type: string
+      payload_json:
+        description: JSON object payload
+        required: true
+        default: '{"rounds":250000}'
+        type: string
+      shard:
+        description: Logical shard number
+        required: true
+        default: 0
+        type: number
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  canary:
+    name: CPU-00 canary shard ${{ matrix.shard }}
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Checkout worker
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prove short-lived GitHub OIDC identity
+        env:
+          OIDC_OUTPUT: artifacts/oidc-claims-${{ matrix.shard }}.json
+        run: python worker/oidc_claims.py
+
+      - name: Execute deterministic canary workload
+        run: >-
+          python worker/hive_worker.py
+          --task-type selftest
+          --job-id "cpu00-canary-${GITHUB_RUN_ID}"
+          --payload-json '{"rounds":250000}'
+          --shard "${{ matrix.shard }}"
+          --output "artifacts/result-${{ matrix.shard }}.json"
+
+      - name: Validate result envelope
+        env:
+          RESULT_PATH: artifacts/result-${{ matrix.shard }}.json
+        run: |
+          python - <<'PY'
+          import json, os
+          p=os.environ['RESULT_PATH']
+          r=json.load(open(p))
+          assert r['schema_version']=='1.0'
+          assert r['node_id']=='hive-compute-node-00'
+          assert r['provider']=='github-actions'
+          assert r['status']=='done'
+          assert r['provenance']['repository']=='giovannifidel-collab/hive-compute-node-00'
+          assert r['result_sha256']
+          print('result envelope valid:', r['result_sha256'])
+          PY
+
+      - name: Upload canary evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: hive-cpu00-canary-${{ github.run_id }}-shard-${{ matrix.shard }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+  dispatch:
+    name: HIVE dispatched CPU task
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout worker
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prove short-lived GitHub OIDC identity
+        env:
+          OIDC_OUTPUT: artifacts/oidc-claims.json
+        run: python worker/oidc_claims.py
+
+      - name: Execute allow-listed HIVE task
+        env:
+          TASK_TYPE: ${{ inputs.task_type }}
+          JOB_ID: ${{ inputs.job_id }}
+          PAYLOAD_JSON: ${{ inputs.payload_json }}
+          SHARD: ${{ inputs.shard }}
+        run: >-
+          python worker/hive_worker.py
+          --task-type "${TASK_TYPE}"
+          --job-id "${JOB_ID}"
+          --payload-json "${PAYLOAD_JSON}"
+          --shard "${SHARD}"
+          --output artifacts/result.json
+
+      - name: Upload task evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: hive-cpu00-result-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
