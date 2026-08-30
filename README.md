@@ -14,7 +14,8 @@ This repository is an execution resource. It is **not** an orchestrator, not a p
 - Provider: GitHub Actions
 - Class: CPU
 - Role: primary canary
-- HIVE endpoint: `https://hive-alveare.pages.dev/api/compute-worker`
+- Primary managed mode: stateless Job Envelope -> artifact
+- Optional callback endpoint: `https://hive-alveare.pages.dev/api/compute-worker`
 - Raw GitHub OIDC token persisted: no
 - Database password required on worker: no
 
@@ -22,21 +23,24 @@ This repository is an execution resource. It is **not** an orchestrator, not a p
 
 The worker accepts only versioned/allow-listed task types. It never executes arbitrary remote shell commands. Every execution emits a machine-readable result envelope with runner provenance and SHA-256 evidence.
 
-The default-branch canary workflow launches four independent GitHub-hosted runner shards. That proves real parallel execution before HIVE certifies the node.
+The default-branch canary workflow launches four independent GitHub-hosted runner shards and exercises both direct deterministic execution and the same Job Envelope path used by HIVE.
 
-For managed work, CPU-00 operates as a pull worker after HIVE triggers the workflow: it authenticates, claims one eligible task from HIVE, validates the versioned job envelope, executes only an allow-listed workload and returns output plus provenance.
+### Primary managed path: stateless artifact dispatch
 
-## Authentication
+HIVE sends a versioned Job Envelope through GitHub `workflow_dispatch`. CPU-00 validates the envelope and capabilities, executes the allow-listed workload, and uploads the result/provenance as a GitHub Actions artifact. HIVE retrieves run state and evidence from GitHub and commits the result to its own task state.
 
-Two independent identities are required for managed HIVE work:
+This path requires **no HIVE credential, database password, or Cloudflare secret on the public worker**.
 
-1. GitHub Actions issues a short-lived OIDC JWT with audience `hive-compute-fabric`. HIVE verifies its signature and exact repository/workflow claims.
-2. Cloudflare Access admits the worker through HIVE's private perimeter. Its credentials belong only in GitHub Actions encrypted secrets:
-   - `HIVE_CF_ACCESS_CLIENT_ID`
-   - `HIVE_CF_ACCESS_CLIENT_SECRET`
+### Optional callback path
 
-No credential value belongs in this repository. Until those encrypted secrets are configured, canary runs explicitly record `access-service-token-pending` and remain useful for local CPU/OIDC certification.
+For workloads that later need active lease heartbeats or direct completion callbacks, CPU-00 also supports an authenticated HIVE client. That path uses short-lived GitHub OIDC plus Cloudflare Access and remains optional.
+
+The optional encrypted repository secrets are:
+- `HIVE_CF_ACCESS_CLIENT_ID`
+- `HIVE_CF_ACCESS_CLIENT_SECRET`
+
+No credential value belongs in this repository.
 
 ## Activation policy
 
-Presence of this repository or a successful workflow does not by itself authorize production scheduling. HIVE must separately register live heartbeat evidence and explicitly certify this node before managed tasks may be routed to it.
+Presence of this repository or a successful workflow does not by itself authorize production scheduling. HIVE must separately register evidence and explicitly certify this node before it becomes a production dispatch target.

@@ -11,11 +11,22 @@ on:
       mode:
         description: Execution mode
         required: true
-        default: direct
+        default: envelope
         type: choice
         options:
+          - envelope
           - direct
           - claim
+      hive_task_id:
+        description: HIVE task UUID for envelope mode
+        required: false
+        default: ''
+        type: string
+      envelope_b64:
+        description: URL-safe base64 HIVE Job Envelope v1 for stateless execution
+        required: false
+        default: ''
+        type: string
       task_type:
         description: Allow-listed direct task type
         required: true
@@ -87,21 +98,56 @@ jobs:
           --shard "${{ matrix.shard }}"
           --output "artifacts/result-${{ matrix.shard }}.json"
 
-      - name: Validate result envelope
+      - name: Validate stateless Job Envelope execution
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          ENVELOPE_B64="$(python - <<'PY'
+          import base64, json, os
+          envelope={
+            'schema_version':'1.0',
+            'job_id':f"stateless-canary-{os.environ['GITHUB_RUN_ID']}-{os.environ['SHARD']}",
+            'project_slug':'hive',
+            'priority':50,
+            'workload':{'name':'selftest','version':'1'},
+            'requirements':{'class':'cpu','required_capabilities':['cpu','github-actions']},
+            'source':{'repository':'giovannifidel-collab/hive-compute-node-00','commit_or_version':os.environ['GITHUB_SHA']},
+            'inputs':[],
+            'parameters':{'rounds':50000},
+            'evidence_required':True,
+            'metadata':{'shard':int(os.environ['SHARD'])}
+          }
+          raw=json.dumps(envelope,separators=(',',':')).encode()
+          print(base64.urlsafe_b64encode(raw).decode().rstrip('='))
+          PY
+          )"
+          python worker/run_job_envelope.py \
+            --envelope-b64 "$ENVELOPE_B64" \
+            --hive-task-id "canary-${GITHUB_RUN_ID}-${SHARD}" \
+            --output "artifacts/stateless-result-${SHARD}.json"
+
+      - name: Validate result envelopes
         env:
           RESULT_PATH: artifacts/result-${{ matrix.shard }}.json
+          STATELESS_RESULT_PATH: artifacts/stateless-result-${{ matrix.shard }}.json
         run: |
           python - <<'PY'
           import json, os
-          p=os.environ['RESULT_PATH']
-          r=json.load(open(p))
-          assert r['schema_version']=='1.0'
-          assert r['node_id']=='hive-compute-node-00'
-          assert r['provider']=='github-actions'
-          assert r['status']=='done'
-          assert r['provenance']['repository']=='giovannifidel-collab/hive-compute-node-00'
-          assert r['result_sha256']
-          print('result envelope valid:', r['result_sha256'])
+          direct=json.load(open(os.environ['RESULT_PATH']))
+          assert direct['schema_version']=='1.0'
+          assert direct['node_id']=='hive-compute-node-00'
+          assert direct['provider']=='github-actions'
+          assert direct['status']=='done'
+          assert direct['provenance']['repository']=='giovannifidel-collab/hive-compute-node-00'
+          assert direct['result_sha256']
+          stateless=json.load(open(os.environ['STATELESS_RESULT_PATH']))
+          assert stateless['status']=='done'
+          assert stateless['dispatch_mode']=='stateless-artifact'
+          assert stateless['project_slug']=='hive'
+          assert stateless['hive_task_id']
+          assert stateless['job_envelope']['workload']['name']=='selftest'
+          print('direct result valid:', direct['result_sha256'])
+          print('stateless envelope result valid:', stateless['job_id'])
           PY
 
       - name: Upload canary evidence
@@ -135,6 +181,18 @@ jobs:
         env:
           OIDC_OUTPUT: artifacts/oidc-claims.json
         run: python worker/oidc_claims.py
+
+      - name: Execute stateless HIVE Job Envelope
+        if: inputs.mode == 'envelope'
+        env:
+          HIVE_TASK_ID: ${{ inputs.hive_task_id }}
+          ENVELOPE_B64: ${{ inputs.envelope_b64 }}
+        run: |
+          test -n "$ENVELOPE_B64" || { echo 'envelope_b64 is required for envelope mode' >&2; exit 2; }
+          python worker/run_job_envelope.py \
+            --envelope-b64 "$ENVELOPE_B64" \
+            --hive-task-id "$HIVE_TASK_ID" \
+            --output artifacts/result.json
 
       - name: Claim and execute one HIVE task
         if: inputs.mode == 'claim'
