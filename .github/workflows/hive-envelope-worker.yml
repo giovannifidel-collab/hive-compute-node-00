@@ -1,0 +1,79 @@
+name: HIVE CPU-00 Envelope Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      hive_task_id:
+        description: HIVE task UUID
+        required: true
+        type: string
+      attempt_token:
+        description: HIVE dispatch attempt token
+        required: true
+        type: string
+      envelope_b64:
+        description: URL-safe base64 HIVE Job Envelope v1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  execute:
+    name: Execute HIVE Job Envelope
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout CPU-00 worker
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prove short-lived GitHub OIDC identity
+        env:
+          OIDC_OUTPUT: artifacts/oidc-claims.json
+        run: python worker/oidc_claims.py
+
+      - name: Execute allow-listed Job Envelope
+        env:
+          HIVE_TASK_ID: ${{ inputs.hive_task_id }}
+          ATTEMPT_TOKEN: ${{ inputs.attempt_token }}
+          ENVELOPE_B64: ${{ inputs.envelope_b64 }}
+        run: >-
+          python worker/run_job_envelope.py
+          --envelope-b64 "$ENVELOPE_B64"
+          --hive-task-id "$HIVE_TASK_ID"
+          --attempt-token "$ATTEMPT_TOKEN"
+          --output artifacts/result.json
+
+      - name: Validate sealed result
+        run: |
+          python - <<'PY'
+          import hashlib, json
+          p='artifacts/result.json'
+          r=json.load(open(p))
+          expected=r.pop('result_sha256')
+          raw=json.dumps(r,sort_keys=True,separators=(',',':')).encode()
+          actual=hashlib.sha256(raw).hexdigest()
+          assert expected==actual, (expected,actual)
+          assert r['status']=='done'
+          assert r['node_id']=='hive-compute-node-00'
+          assert r['provider']=='github-actions'
+          assert r['hive_task_id']
+          assert r['attempt_token']
+          assert r['dispatch_mode']=='stateless-artifact'
+          print('sealed result PASS', expected)
+          PY
+
+      - name: Upload result.json directly
+        uses: actions/upload-artifact@v7
+        with:
+          path: artifacts/result.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
