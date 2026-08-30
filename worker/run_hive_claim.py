@@ -26,12 +26,13 @@ def envelope_from_task(task):
         raise RuntimeError("claimed task envelope is not an object")
     if envelope.get("schema_version") != "1.0":
         raise RuntimeError("unsupported job envelope version")
+    job_id = str(envelope.get("job_id") or "").strip()
+    if not job_id:
+        raise RuntimeError("job envelope job_id is required")
     workload = envelope.get("workload") or {}
     name = workload.get("name")
     if name not in ALLOWED_WORKLOADS:
         raise RuntimeError(f"workload not allowed on CPU-00: {name}")
-    if str(envelope.get("job_id")) != str(task.get("task_id")):
-        raise RuntimeError("job envelope id does not match HIVE task id")
     return envelope
 
 
@@ -57,8 +58,10 @@ def main():
         return
 
     task_id = str(task["task_id"])
+    job_id = None
     try:
         envelope = envelope_from_task(task)
+        job_id = str(envelope["job_id"])
         workload = envelope["workload"]["name"]
         parameters = envelope.get("parameters") or {}
         result_path = artifact_dir / "result.json"
@@ -68,7 +71,7 @@ def main():
             sys.executable,
             str(Path(__file__).with_name("hive_worker.py")),
             "--task-type", workload,
-            "--job-id", task_id,
+            "--job-id", job_id,
             "--payload-json", json.dumps(parameters, separators=(",", ":")),
             "--shard", str(shard),
             "--output", str(result_path),
@@ -81,6 +84,8 @@ def main():
             "output": result.get("output", {}),
             "provenance": {
                 **(result.get("provenance") or {}),
+                "hive_task_id": task_id,
+                "job_id": job_id,
                 "job_envelope": envelope,
                 "input_sha256": result.get("input_sha256"),
                 "output_sha256": result.get("output_sha256"),
@@ -89,7 +94,12 @@ def main():
             "provider_job_ref": os.environ.get("GITHUB_RUN_ID"),
         })
         write(artifact_dir / "completion.json", complete)
-        print(json.dumps({"ok": True, "task_id": task_id, "state": "completed"}, sort_keys=True))
+        print(json.dumps({
+            "ok": True,
+            "task_id": task_id,
+            "job_id": job_id,
+            "state": "completed"
+        }, sort_keys=True))
     except Exception as exc:
         error = {"type": type(exc).__name__, "message": str(exc)[:2000]}
         write(artifact_dir / "worker-error.json", error)
@@ -99,6 +109,8 @@ def main():
                 "status": "failed",
                 "output": {},
                 "provenance": {
+                    "hive_task_id": task_id,
+                    "job_id": job_id,
                     "github_run_id": os.environ.get("GITHUB_RUN_ID"),
                     "github_sha": os.environ.get("GITHUB_SHA"),
                 },
