@@ -94,7 +94,6 @@ jobs:
       - name: Upload non-zipped canary result
         uses: actions/upload-artifact@v7
         with:
-          name: hive-result-canonical-canary-${{ github.run_id }}
           path: artifacts/result.json
           archive: false
           if-no-files-found: error
@@ -160,7 +159,6 @@ jobs:
       - name: Upload result.json directly
         uses: actions/upload-artifact@v7
         with:
-          name: hive-result-${{ inputs.hive_task_id }}-${{ inputs.attempt_token }}
           path: artifacts/result.json
           archive: false
           if-no-files-found: error
