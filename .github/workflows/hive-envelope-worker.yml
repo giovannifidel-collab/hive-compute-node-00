@@ -1,6 +1,12 @@
 name: HIVE CPU-00 Envelope Worker
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hive-envelope-worker.yml'
+      - 'worker/run_job_envelope.py'
+      - 'worker/hive_worker.py'
   workflow_dispatch:
     inputs:
       hive_task_id:
@@ -21,8 +27,82 @@ permissions:
   id-token: write
 
 jobs:
+  canary:
+    name: Canonical envelope canary
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout CPU-00 worker
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Execute canonical canary envelope
+        run: |
+          ENVELOPE_B64="$(python - <<'PY'
+          import base64,json,os
+          e={
+            'schema_version':'1.0',
+            'job_id':f"canonical-canary-{os.environ['GITHUB_RUN_ID']}",
+            'project_slug':'hive',
+            'priority':50,
+            'workload':{'name':'selftest','version':'1'},
+            'requirements':{'class':'cpu','required_capabilities':['cpu','github-actions']},
+            'source':{'repository':os.environ['GITHUB_REPOSITORY'],'commit_or_version':os.environ['GITHUB_SHA']},
+            'inputs':[],
+            'parameters':{'rounds':50000},
+            'evidence_required':True,
+            'metadata':{'shard':0,'canary':True}
+          }
+          print(base64.urlsafe_b64encode(json.dumps(e,separators=(',',':')).encode()).decode().rstrip('='))
+          PY
+          )"
+          python worker/run_job_envelope.py \
+            --envelope-b64 "$ENVELOPE_B64" \
+            --hive-task-id '00000000-0000-4000-8000-000000000000' \
+            --attempt-token '00000000-0000-4000-8000-000000000001' \
+            --output artifacts/result.json
+
+      - name: Validate canonical sealed result
+        run: |
+          python - <<'PY'
+          import hashlib,json
+          r=json.load(open('artifacts/result.json'))
+          expected=r.pop('result_sha256')
+          actual=hashlib.sha256(json.dumps(r,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+          assert expected==actual
+          assert r['schema_version']=='1.0'
+          assert r['status']=='completed'
+          assert r['node']['node_id']=='hive-compute-node-00'
+          assert r['node']['provider']=='github-actions'
+          assert r['node']['provider_run_ref']
+          assert r['workload']['name']=='selftest'
+          assert r['provenance']['source_commit_or_version']
+          assert isinstance(r['provenance']['software'],dict)
+          assert isinstance(r['provenance']['hardware'],dict)
+          assert r['metadata']['hive_task_id']
+          assert r['metadata']['attempt_token']
+          assert r['metadata']['dispatch_mode']=='stateless-artifact'
+          assert isinstance(r['output'],dict)
+          print('canonical envelope PASS',expected)
+          PY
+
+      - name: Upload non-zipped canary result
+        uses: actions/upload-artifact@v7
+        with:
+          name: hive-result-canonical-canary-${{ github.run_id }}
+          path: artifacts/result.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
   execute:
     name: Execute HIVE Job Envelope
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
