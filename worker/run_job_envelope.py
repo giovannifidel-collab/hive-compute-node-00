@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ALLOWED_WORKLOADS = {"selftest", "sha256-burn"}
@@ -13,6 +14,10 @@ ALLOWED_WORKLOADS = {"selftest", "sha256-burn"}
 def canonical_hash(value):
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def iso_utc(unix_value):
+    return datetime.fromtimestamp(float(unix_value), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def decode_envelope(raw_b64: str):
@@ -57,6 +62,91 @@ def decode_envelope(raw_b64: str):
     return envelope
 
 
+def input_hashes(envelope, base):
+    hashes = {"parameters": base["input_sha256"]}
+    for item in envelope.get("inputs") or []:
+        if isinstance(item, dict) and item.get("name") and item.get("sha256"):
+            hashes[str(item["name"])] = str(item["sha256"]).removeprefix("sha256:")
+    return hashes
+
+
+def canonical_result(envelope, base, hive_task_id, attempt_token):
+    prov = base.get("provenance") or {}
+    source = envelope.get("source") or {}
+    status = "completed" if base.get("status") == "done" else "failed"
+    result = {
+        "schema_version": "1.0",
+        "job_id": str(envelope["job_id"]),
+        "node": {
+            "node_id": str(base.get("node_id") or "hive-compute-node-00"),
+            "provider": str(base.get("provider") or "github-actions"),
+            "provider_run_ref": str(prov.get("run_id") or "unknown"),
+        },
+        "workload": {
+            "name": str(envelope["workload"]["name"]),
+            "version": str(envelope["workload"]["version"]),
+        },
+        "status": status,
+        "exit_code": 0 if status == "completed" else 1,
+        "started_at": iso_utc(base["started_unix"]),
+        "ended_at": iso_utc(base["finished_unix"]),
+        "provenance": {
+            "source_commit_or_version": str(source.get("commit_or_version") or prov.get("sha") or "unknown"),
+            "source_sha256": source.get("sha256"),
+            "input_hashes": input_hashes(envelope, base),
+            "software": {
+                "worker": "hive-compute-cpu-worker",
+                "worker_protocol": "1.0",
+                "python": prov.get("python"),
+                "task_type": base.get("task_type"),
+            },
+            "hardware": {
+                "logical_cpu_count": prov.get("logical_cpu_count"),
+                "memory_total_gb": prov.get("memory_total_gb"),
+                "runner_os": prov.get("runner_os"),
+                "runner_arch": prov.get("runner_arch"),
+            },
+            "environment": {
+                "repository": prov.get("repository"),
+                "repository_id": prov.get("repository_id"),
+                "repository_owner_id": prov.get("repository_owner_id"),
+                "workflow": prov.get("workflow"),
+                "workflow_ref": prov.get("workflow_ref"),
+                "run_id": prov.get("run_id"),
+                "run_attempt": prov.get("run_attempt"),
+                "run_number": prov.get("run_number"),
+                "sha": prov.get("sha"),
+                "ref": prov.get("ref"),
+                "event_name": prov.get("event_name"),
+                "runner_name": prov.get("runner_name"),
+                "platform": prov.get("platform"),
+                "kernel": prov.get("kernel"),
+            },
+        },
+        "artifacts": [],
+        "metrics": {
+            "duration_seconds": base.get("duration_seconds"),
+            "input_sha256": base.get("input_sha256"),
+            "output_sha256": base.get("output_sha256"),
+            "base_result_sha256": base.get("result_sha256"),
+        },
+        "output": base.get("output") or {},
+        "warnings": [],
+        "error": None if status == "completed" else "worker reported failure",
+        "metadata": {
+            "project_slug": envelope["project_slug"],
+            "hive_task_id": hive_task_id or None,
+            "attempt_token": attempt_token or None,
+            "dispatch_mode": "stateless-artifact",
+            "shard": int(base.get("shard") or 0),
+            "job_envelope": envelope,
+            "seal": "sha256-canonical-json-v1",
+        },
+    }
+    result["result_sha256"] = canonical_hash(result)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Execute a HIVE Job Envelope v1 without worker secrets")
     parser.add_argument("--envelope-b64", required=True)
@@ -72,6 +162,7 @@ def main():
     shard = int((envelope.get("metadata") or {}).get("shard", 0))
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
+    raw_path = out.with_suffix(".raw.json")
 
     subprocess.run([
         sys.executable,
@@ -80,26 +171,20 @@ def main():
         "--job-id", job_id,
         "--payload-json", json.dumps(parameters, separators=(",", ":")),
         "--shard", str(shard),
-        "--output", str(out),
+        "--output", str(raw_path),
     ], check=True)
 
-    result = json.loads(out.read_text())
-    base_result_sha256 = result.pop("result_sha256", None)
-    result["project_slug"] = envelope["project_slug"]
-    result["hive_task_id"] = args.hive_task_id or None
-    result["attempt_token"] = args.attempt_token or None
-    result["job_envelope"] = envelope
-    result["dispatch_mode"] = "stateless-artifact"
-    result["base_result_sha256"] = base_result_sha256
-    result["result_sha256"] = canonical_hash(result)
+    base = json.loads(raw_path.read_text())
+    result = canonical_result(envelope, base, args.hive_task_id, args.attempt_token)
     out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    raw_path.unlink(missing_ok=True)
     print(json.dumps({
-        "ok": result.get("status") == "done",
-        "hive_task_id": result.get("hive_task_id"),
-        "attempt_token_present": bool(result.get("attempt_token")),
-        "job_id": job_id,
-        "project_slug": envelope["project_slug"],
-        "dispatch_mode": result["dispatch_mode"],
+        "ok": result["status"] == "completed",
+        "hive_task_id": result["metadata"]["hive_task_id"],
+        "attempt_token_present": bool(result["metadata"]["attempt_token"]),
+        "job_id": result["job_id"],
+        "project_slug": result["metadata"]["project_slug"],
+        "dispatch_mode": result["metadata"]["dispatch_mode"],
         "result_sha256": result["result_sha256"],
     }, sort_keys=True))
 
